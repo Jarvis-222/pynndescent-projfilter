@@ -23,7 +23,10 @@ from pathlib import Path
 import numpy as np
 import pynndescent
 
-DATA_DIR = Path("/home/jainish/UWaterloo/Winter_2026/nn-descent-cpp/data")
+DATA_DIR = Path(os.environ.get(
+    "NN_DATA_DIR",
+    "/home/jainish/UWaterloo/Winter_2026/nn-descent-cpp/data",
+))
 
 DATASETS = {
     "gist10k": {
@@ -51,10 +54,21 @@ DATASETS = {
     },
     "sift1m": {
         "base": DATA_DIR / "sift" / "sift_base.fvecs",
-        "gt":   DATA_DIR / "sift1m_l2_gt.bin",
+        # NB: capital M in filename matches the uni-machine convention
+        # (sift1M_l2_gt.bin). Linux filesystems are case-sensitive.
+        "gt":   DATA_DIR / "sift1M_l2_gt.bin",
         "n_subset": 1000000,
-        "queries": None,
-        "search_gt": None,
+        "queries":   DATA_DIR / "sift" / "sift_query.fvecs",
+        "search_gt": DATA_DIR / "sift" / "sift_groundtruth.ivecs",
+    },
+    "gist1m": {
+        "base":      DATA_DIR / "gist" / "gist_base.fvecs",
+        "gt":        DATA_DIR / "gist1m_l2_gt.bin",
+        "n_subset":  1000000,
+        # Official GIST query set + GT (1000 queries x 100-NN against the
+        # full 1M base; get_or_compute_search_gt slices to top-k as needed).
+        "queries":   DATA_DIR / "gist" / "gist_query.fvecs",
+        "search_gt": DATA_DIR / "gist" / "gist_groundtruth.ivecs",
     },
 }
 
