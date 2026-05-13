@@ -41,6 +41,8 @@ from pynndescent.utils import (
     initalize_heap_from_graph_indices_and_distances,
     sparse_initalize_heap_from_graph_indices,
     EMPTY_GRAPH,
+    EMPTY_PROJECTIONS,
+    EMPTY_COUNTER,
 )
 
 from pynndescent.rp_trees import (
@@ -226,6 +228,11 @@ def process_candidates(
     n_threads,
     update_array,
     n_updates_per_thread,
+    projections,
+    t_sq,
+    use_projection_filter,
+    dist_comp_counter,
+    filter_skip_counter,
 ):
     """Process candidate neighbors using array-based update generation.
 
@@ -233,6 +240,9 @@ def process_candidates(
     1. No dynamic memory allocation during parallel loops
     2. Better cache locality with contiguous array storage
     3. Each thread writes to its own section of the array
+
+    Projection-filter parameters are passed through to
+    generate_graph_update_array; see that function for semantics.
     """
     c = 0
     n_vertices = new_candidate_neighbors.shape[0]
@@ -254,6 +264,11 @@ def process_candidates(
             data,
             dist,
             n_threads,
+            projections,
+            t_sq,
+            use_projection_filter,
+            dist_comp_counter,
+            filter_skip_counter,
         )
 
         c += apply_graph_update_array(
@@ -274,6 +289,11 @@ def nn_descent_internal(
     n_iters=10,
     delta=0.001,
     verbose=False,
+    projections=EMPTY_PROJECTIONS,
+    t_sq=np.float32(0.0),
+    use_projection_filter=False,
+    dist_comp_counter=EMPTY_COUNTER,
+    filter_skip_counter=EMPTY_COUNTER,
 ):
     n_vertices = data.shape[0]
     block_size = 16384
@@ -312,6 +332,11 @@ def nn_descent_internal(
             n_threads,
             update_array,
             n_updates_per_thread,
+            projections,
+            t_sq,
+            use_projection_filter,
+            dist_comp_counter,
+            filter_skip_counter,
         )
 
         if c <= delta * n_neighbors * data.shape[0]:
@@ -334,6 +359,11 @@ def nn_descent(
     leaf_array=None,
     low_memory=True,
     verbose=False,
+    projections=EMPTY_PROJECTIONS,
+    t_sq=np.float32(0.0),
+    use_projection_filter=False,
+    dist_comp_counter=EMPTY_COUNTER,
+    filter_skip_counter=EMPTY_COUNTER,
 ):
 
     if init_graph[0].shape[0] == 1:  # EMPTY_GRAPH
@@ -361,6 +391,11 @@ def nn_descent(
         n_iters=n_iters,
         delta=delta,
         verbose=verbose,
+        projections=projections,
+        t_sq=t_sq,
+        use_projection_filter=use_projection_filter,
+        dist_comp_counter=dist_comp_counter,
+        filter_skip_counter=filter_skip_counter,
     )
 
     return deheap_sort(current_graph[0], current_graph[1])
@@ -992,12 +1027,19 @@ class NNDescent:
         compressed=False,
         parallel_batch_queries=False,
         verbose=False,
+        use_projection_filter=False,
+        num_projections=16,
+        filter_confidence=0.95,
     ):
 
         if n_trees is None:
             n_trees = max(3, min(12, int(round(2.0 * np.log10(data.shape[0])))))
         if n_iters is None:
             n_iters = max(5, int(round(np.log2(data.shape[0]))))
+
+        self.use_projection_filter = use_projection_filter
+        self.num_projections = num_projections
+        self.filter_confidence = filter_confidence
 
         self.n_trees = n_trees
         self.n_trees_after_update = max(2, int(np.round(self.n_trees / 3)))
@@ -1049,6 +1091,44 @@ class NNDescent:
         self._dist_args = tuple(metric_kwds.values())
 
         self.random_state = random_state
+
+        # Precompute random projections + chi-squared threshold for the
+        # projection filter. Matches the LSH-APG (PVLDB 2023, Eq. 4) scheme
+        # used by the C++ baseline: i.i.d. N(0, 1) entries (unnormalized),
+        # threshold t^2 = chi2_{p_tau}(m).
+        if self.use_projection_filter:
+            from scipy.stats import chi2
+
+            # Seed the projection RNG from random_state when it's an integer
+            # (the common case); otherwise use OS entropy. PyNNDescent itself
+            # accepts None / int / np.random.RandomState — we only mirror the
+            # int form for reproducibility of the projection matrix.
+            if isinstance(random_state, (int, np.integer)):
+                proj_seed = int(random_state)
+            else:
+                proj_seed = None
+            proj_rng = np.random.default_rng(proj_seed)
+            proj_matrix = proj_rng.standard_normal(
+                (data.shape[1], self.num_projections),
+            ).astype(np.float32)
+            # data @ proj_matrix: (n, dim) @ (dim, m) -> (n, m). For sparse
+            # data the result is densified — fine for SIFT/GIST workloads.
+            self._projections = np.ascontiguousarray(
+                data @ proj_matrix, dtype=np.float32,
+            )
+            self._t_sq = np.float32(
+                chi2.ppf(self.filter_confidence, self.num_projections)
+            )
+        else:
+            self._projections = EMPTY_PROJECTIONS
+            self._t_sq = np.float32(0.0)
+
+        # Per-thread dist-comp + filter-skip counters. Allocated here so we
+        # can read the totals back after nn_descent returns. Sized to the
+        # active Numba thread count.
+        n_threads_active = numba.get_num_threads()
+        self._dist_comp_counter = np.zeros(n_threads_active, dtype=np.int64)
+        self._filter_skip_counter = np.zeros(n_threads_active, dtype=np.int64)
 
         current_random_state = check_random_state(self.random_state)
 
@@ -1235,7 +1315,15 @@ class NNDescent:
                 init_graph=_init_graph,
                 leaf_array=leaf_array,
                 verbose=verbose,
+                projections=self._projections,
+                t_sq=self._t_sq,
+                use_projection_filter=self.use_projection_filter,
+                dist_comp_counter=self._dist_comp_counter,
+                filter_skip_counter=self._filter_skip_counter,
             )
+        # Expose totals for benchmarks/instrumentation.
+        self.n_dist_comps = int(self._dist_comp_counter.sum())
+        self.n_filter_skips = int(self._filter_skip_counter.sum())
 
         if np.any(self._neighbor_graph[0] < 0):
             warn(

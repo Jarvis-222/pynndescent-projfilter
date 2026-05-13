@@ -161,6 +161,22 @@ def make_heap(n_points, size):
 # Sentinel value for empty/uninitialized graphs
 EMPTY_GRAPH = make_heap(1, 1)
 
+# Sentinel for use_projection_filter=False path: a 1x1 float32 array.
+# Numba requires concrete typed arrays as function arguments even when
+# the filter is disabled, so a dummy zeros array is passed.
+EMPTY_PROJECTIONS = np.zeros((1, 1), dtype=np.float32)
+
+# Sentinel for callers that don't care about dist-comp instrumentation
+# (e.g. the .update() path). Sized large enough so per-thread writes
+# from any reasonable thread count land in-bounds; reads are discarded.
+EMPTY_COUNTER = np.zeros(256, dtype=np.int64)
+
+# Threshold above which dist_thresh is treated as "not yet meaningful"
+# (i.e., heap not yet full of real neighbors). Initial heap distances are
+# np.inf; under fastmath=True the LLVM 'ninf' flag makes inf-arithmetic
+# undefined, so we use this finite sentinel to short-circuit safely.
+PROJECTION_FILTER_INF_GUARD = np.float32(1e30)
+
 
 @numba.njit(cache=True)
 def siftdown(heap1, heap2, elt):
@@ -543,6 +559,9 @@ def checked_flagged_heap_push(priorities, indices, flags, p, n, f):
         "d": numba.float32,
         "max_updates": numba.int32,
         "max_threshold": numba.float32,
+        "pdsq": numba.float32,
+        "diff": numba.float32,
+        "kk": numba.int32,
     },
     cache=False,
     fastmath=True,
@@ -556,6 +575,11 @@ def generate_graph_update_array(
     data,
     dist,
     n_threads,
+    projections,
+    t_sq,
+    use_projection_filter,
+    dist_comp_counter,
+    filter_skip_counter,
 ):
     """Generate graph updates into a pre-allocated array.
 
@@ -589,6 +613,18 @@ def generate_graph_update_array(
 
     n_threads : int
         Number of threads to use.
+
+    projections : ndarray of shape (n_vertices, m) float32
+        Precomputed random projections. When use_projection_filter=False,
+        EMPTY_PROJECTIONS (1x1) is passed as a typed sentinel.
+
+    t_sq : float32
+        Chi-squared threshold t^2 = chi2_pτ(m). Filter fires when
+        projected squared distance exceeds t_sq * dk^2 for BOTH endpoints.
+
+    use_projection_filter : bool
+        Master switch. When False, filter logic is skipped entirely
+        and behavior is identical to vanilla PyNNDescent.
     """
     block_size = new_candidate_block.shape[0]
     max_new_candidates = new_candidate_block.shape[1]
@@ -624,10 +660,34 @@ def generate_graph_update_array(
                     if q < 0:
                         continue
 
+                    # Hoisted above dist() call so projection filter can use it.
+                    dist_thresh_q = dist_thresholds[q]
+
+                    # Projection filter: skip pair if cheap projected distance
+                    # statistically rules out both heaps accepting the pair.
+                    # See LSH-APG (PVLDB 2023, Eq. 4). INF_GUARD short-circuits
+                    # the warm-up phase where dist_thresh == inf (heap not full
+                    # yet) — under fastmath, inf-arithmetic is undefined.
+                    if (
+                        use_projection_filter
+                        and dist_thresh_p < PROJECTION_FILTER_INF_GUARD
+                        and dist_thresh_q < PROJECTION_FILTER_INF_GUARD
+                    ):
+                        pdsq = np.float32(0.0)
+                        for kk in range(projections.shape[1]):
+                            diff = projections[p, kk] - projections[q, kk]
+                            pdsq += diff * diff
+                        if (
+                            pdsq > t_sq * dist_thresh_p * dist_thresh_p
+                            and pdsq > t_sq * dist_thresh_q * dist_thresh_q
+                        ):
+                            filter_skip_counter[t] += 1
+                            continue
+
+                    dist_comp_counter[t] += 1
                     d = dist(data_p, data[q])
 
                     # Use max for better branch prediction than OR condition
-                    dist_thresh_q = dist_thresholds[q]
                     max_threshold = max(dist_thresh_p, dist_thresh_q)
 
                     if d <= max_threshold:
@@ -645,8 +705,28 @@ def generate_graph_update_array(
                     if q < 0:
                         continue
 
-                    d = dist(data_p, data[q])
+                    # Hoisted above dist() call for the projection filter.
                     dist_thresh_q = dist_thresholds[q]
+
+                    # Projection filter, second site (new x old pairs).
+                    if (
+                        use_projection_filter
+                        and dist_thresh_p < PROJECTION_FILTER_INF_GUARD
+                        and dist_thresh_q < PROJECTION_FILTER_INF_GUARD
+                    ):
+                        pdsq = np.float32(0.0)
+                        for kk in range(projections.shape[1]):
+                            diff = projections[p, kk] - projections[q, kk]
+                            pdsq += diff * diff
+                        if (
+                            pdsq > t_sq * dist_thresh_p * dist_thresh_p
+                            and pdsq > t_sq * dist_thresh_q * dist_thresh_q
+                        ):
+                            filter_skip_counter[t] += 1
+                            continue
+
+                    dist_comp_counter[t] += 1
+                    d = dist(data_p, data[q])
                     max_threshold = max(dist_thresh_p, dist_thresh_q)
 
                     if d <= max_threshold:
