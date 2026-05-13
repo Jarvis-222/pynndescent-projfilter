@@ -150,13 +150,14 @@ def recall_at_k(pred, gt, k):
     return total / (n * k)
 
 
-def build(data, n_neighbors, seed, use_filter, m, p_tau, verbose):
+def build(data, n_neighbors, seed, use_filter, m, p_tau, verbose, tree_init):
     t0 = time.perf_counter()
     idx = pynndescent.NNDescent(
         data,
         n_neighbors=n_neighbors,
         random_state=seed,
         verbose=verbose,
+        tree_init=tree_init,
         use_projection_filter=use_filter,
         num_projections=m,
         filter_confidence=p_tau,
@@ -172,8 +173,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--m", type=int, default=16, help="num projections")
     ap.add_argument("--p-tau", type=float, default=0.95, help="filter confidence")
+    ap.add_argument("--no-tree-init", action="store_true",
+                    help="Disable RP-tree init (random init only, matches C++ baseline)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    tree_init = not args.no_tree_init
 
     cfg = DATASETS[args.dataset]
     print(f"Dataset:    {args.dataset}")
@@ -181,7 +185,7 @@ def main():
     print(f"  gt:       {cfg['gt']}")
     print(f"  n_subset: {cfg['n_subset']}")
     print(f"Config:     n_neighbors={args.n_neighbors} seed={args.seed} "
-          f"m={args.m} p_tau={args.p_tau}")
+          f"m={args.m} p_tau={args.p_tau} tree_init={tree_init}")
 
     print("\nLoading data...", flush=True)
     t = time.perf_counter()
@@ -213,8 +217,10 @@ def main():
     rng = np.random.default_rng(42)
     warm = rng.standard_normal((200, 16)).astype(np.float32)
     _ = pynndescent.NNDescent(warm, n_neighbors=5, random_state=0,
+                              tree_init=tree_init,
                               use_projection_filter=False, verbose=False)
     _ = pynndescent.NNDescent(warm, n_neighbors=5, random_state=0,
+                              tree_init=tree_init,
                               use_projection_filter=True, num_projections=args.m,
                               filter_confidence=args.p_tau, verbose=False)
     print(f"  done ({time.perf_counter()-t:.1f}s)")
@@ -223,7 +229,7 @@ def main():
     print("VANILLA PyNNDescent")
     print("=" * 60)
     idx_v, time_v = build(data, args.n_neighbors, args.seed, False,
-                           args.m, args.p_tau, args.verbose)
+                           args.m, args.p_tau, args.verbose, tree_init)
     recall_v = recall_at_k(idx_v.neighbor_graph[0], gt, args.n_neighbors)
     print(f"  build time:   {time_v:.2f} s")
     print(f"  recall@{args.n_neighbors}:    {recall_v:.4f}")
@@ -244,7 +250,7 @@ def main():
     print(f"PyNNDescent + ProjFilter (m={args.m}, p_tau={args.p_tau})")
     print("=" * 60)
     idx_f, time_f = build(data, args.n_neighbors, args.seed, True,
-                           args.m, args.p_tau, args.verbose)
+                           args.m, args.p_tau, args.verbose, tree_init)
     recall_f = recall_at_k(idx_f.neighbor_graph[0], gt, args.n_neighbors)
     print(f"  build time:   {time_f:.2f} s")
     print(f"  recall@{args.n_neighbors}:    {recall_f:.4f}")

@@ -23,7 +23,8 @@ from bench_knng import (
 )
 
 
-def one_run(data, n_neighbors, mc, seed, use_filter, m, p_tau, queries, search_gt):
+def one_run(data, n_neighbors, mc, seed, use_filter, m, p_tau,
+            queries, search_gt, tree_init):
     t0 = time.perf_counter()
     idx = pynndescent.NNDescent(
         data,
@@ -31,6 +32,7 @@ def one_run(data, n_neighbors, mc, seed, use_filter, m, p_tau, queries, search_g
         max_candidates=mc,
         random_state=seed,
         verbose=False,
+        tree_init=tree_init,
         use_projection_filter=use_filter,
         num_projections=m,
         filter_confidence=p_tau,
@@ -62,12 +64,15 @@ def main():
     ap.add_argument("--m", type=int, default=16)
     ap.add_argument("--p-tau", type=float, default=0.95)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-tree-init", action="store_true",
+                    help="Disable RP-tree init (random init only)")
     args = ap.parse_args()
     mc_values = [int(x) for x in args.mcs.split(",")]
+    tree_init = not args.no_tree_init
 
     cfg = DATASETS[args.dataset]
     print(f"Sweep on {args.dataset}, max_candidates in {mc_values}, "
-          f"p_tau={args.p_tau}, m={args.m}")
+          f"p_tau={args.p_tau}, m={args.m}, tree_init={tree_init}")
 
     print("Loading data + GT...", flush=True)
     data = load_fvecs(cfg["base"], n_limit=cfg["n_subset"])
@@ -83,9 +88,11 @@ def main():
     rng = np.random.default_rng(42)
     warm = rng.standard_normal((200, 16)).astype(np.float32)
     _ = pynndescent.NNDescent(warm, n_neighbors=5, max_candidates=10,
-                              random_state=0, use_projection_filter=False)
+                              random_state=0, tree_init=tree_init,
+                              use_projection_filter=False)
     _ = pynndescent.NNDescent(warm, n_neighbors=5, max_candidates=10,
-                              random_state=0, use_projection_filter=True,
+                              random_state=0, tree_init=tree_init,
+                              use_projection_filter=True,
                               num_projections=args.m,
                               filter_confidence=args.p_tau)
     print("  done")
@@ -94,14 +101,14 @@ def main():
     for mc in mc_values:
         print(f"\n--- max_candidates = {mc} ---", flush=True)
         v = one_run(data, args.n_neighbors, mc, args.seed, False,
-                    args.m, args.p_tau, queries, search_gt)
+                    args.m, args.p_tau, queries, search_gt, tree_init)
         print(f"  vanilla:  build={v['build_t']:5.2f}s  "
               f"cons={v['cons_recall']:.4f}  "
               f"search={v['search_recall']:.4f}  "
               f"qps={v['qps']:4.0f}  "
               f"dist_comps={v['dist_comps']:,}")
         f = one_run(data, args.n_neighbors, mc, args.seed, True,
-                    args.m, args.p_tau, queries, search_gt)
+                    args.m, args.p_tau, queries, search_gt, tree_init)
         print(f"  filter:   build={f['build_t']:5.2f}s  "
               f"cons={f['cons_recall']:.4f}  "
               f"search={f['search_recall']:.4f}  "
@@ -112,7 +119,8 @@ def main():
 
     # Final summary table
     print("\n" + "=" * 100)
-    print(f"SUMMARY  (dataset={args.dataset}, p_tau={args.p_tau}, m={args.m})")
+    print(f"SUMMARY  (dataset={args.dataset}, p_tau={args.p_tau}, "
+          f"m={args.m}, tree_init={tree_init})")
     print("=" * 100)
     hdr = (
         f"{'mc':>4} | "
