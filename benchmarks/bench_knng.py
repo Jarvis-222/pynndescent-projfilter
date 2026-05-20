@@ -150,6 +150,23 @@ def recall_at_k(pred, gt, k):
     return total / (n * k)
 
 
+def _print_phase(idx, total_time):
+    """Print the per-phase breakdown of the descent loop."""
+    lj = getattr(idx, "t_local_join", 0.0)
+    apu = getattr(idx, "t_apply_update", 0.0)
+    bc = getattr(idx, "t_build_candidates", 0.0)
+    summed = lj + apu + bc
+    other = max(total_time - summed, 0.0)
+    def pct(x):
+        return (100.0 * x / total_time) if total_time > 0 else 0.0
+    print(
+        f"  phase split:  local_join={lj:6.2f}s ({pct(lj):4.1f}%)  "
+        f"apply_update={apu:6.2f}s ({pct(apu):4.1f}%)  "
+        f"build_cand={bc:6.2f}s ({pct(bc):4.1f}%)  "
+        f"other={other:6.2f}s ({pct(other):4.1f}%)"
+    )
+
+
 def build(data, n_neighbors, seed, use_filter, m, p_tau, verbose, tree_init):
     t0 = time.perf_counter()
     idx = pynndescent.NNDescent(
@@ -235,6 +252,7 @@ def main():
     print(f"  recall@{args.n_neighbors}:    {recall_v:.4f}")
     print(f"  dist_comps:   {idx_v.n_dist_comps:,}")
     print(f"  filter_skips: {idx_v.n_filter_skips:,} (should be 0)")
+    _print_phase(idx_v, time_v)
     search_recall_v = None
     qps_v = None
     if queries is not None:
@@ -256,6 +274,7 @@ def main():
     print(f"  recall@{args.n_neighbors}:    {recall_f:.4f}")
     print(f"  dist_comps:   {idx_f.n_dist_comps:,}")
     print(f"  filter_skips: {idx_f.n_filter_skips:,}")
+    _print_phase(idx_f, time_f)
     search_recall_f = None
     qps_f = None
     if queries is not None:
@@ -271,6 +290,21 @@ def main():
     print("SUMMARY")
     print("=" * 60)
     print(f"  Time ratio (filter/vanilla):    {time_f/time_v:.3f}x")
+    if idx_v.t_local_join > 0:
+        lj_ratio = idx_f.t_local_join / idx_v.t_local_join
+        lj_save_pct = 100.0 * (1.0 - lj_ratio)
+        print(
+            f"  Local-join time (vanilla):      {idx_v.t_local_join:.2f}s "
+            f"({100.0*idx_v.t_local_join/time_v:.1f}% of build)"
+        )
+        print(
+            f"  Local-join time (filter):       {idx_f.t_local_join:.2f}s "
+            f"({100.0*idx_f.t_local_join/time_f:.1f}% of build)"
+        )
+        print(
+            f"  Local-join savings:             {lj_save_pct:+.1f}%  "
+            f"(ceiling for filter wall-clock impact)"
+        )
     print(f"  Construction recall delta:      {recall_f - recall_v:+.4f}")
     dc_saved = idx_v.n_dist_comps - idx_f.n_dist_comps
     dc_saved_pct = 100.0 * dc_saved / max(idx_v.n_dist_comps, 1)
