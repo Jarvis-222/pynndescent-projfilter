@@ -93,8 +93,12 @@ def main():
                     help="graph k (constructed graph stores this many neighbors per vertex)")
     ap.add_argument("--mc", type=int, default=40,
                     help="max_candidates (matches C++ paper default of 40)")
-    ap.add_argument("--p-taus", default="0.30,0.50,0.70,0.95,0.99",
-                    help="comma-separated filter confidences (vanilla added automatically)")
+    ap.add_argument(
+        "--p-taus",
+        default="0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,0.95,0.99",
+        help="comma-separated filter confidences (vanilla added automatically); "
+             "default sweeps 0.10..0.90 in 0.10 steps then 0.95, 0.99",
+    )
     ap.add_argument("--epsilons", default="0.0,0.05,0.1,0.2,0.3,0.5",
                     help="comma-separated search-budget values for query() calls")
     ap.add_argument("--eval-ks", default="10,20,50,100",
