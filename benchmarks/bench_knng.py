@@ -150,24 +150,9 @@ def recall_at_k(pred, gt, k):
     return total / (n * k)
 
 
-def _print_phase(idx, total_time):
-    """Print the per-phase breakdown of the descent loop."""
-    lj = getattr(idx, "t_local_join", 0.0)
-    apu = getattr(idx, "t_apply_update", 0.0)
-    bc = getattr(idx, "t_build_candidates", 0.0)
-    summed = lj + apu + bc
-    other = max(total_time - summed, 0.0)
-    def pct(x):
-        return (100.0 * x / total_time) if total_time > 0 else 0.0
-    print(
-        f"  phase split:  local_join={lj:6.2f}s ({pct(lj):4.1f}%)  "
-        f"apply_update={apu:6.2f}s ({pct(apu):4.1f}%)  "
-        f"build_cand={bc:6.2f}s ({pct(bc):4.1f}%)  "
-        f"other={other:6.2f}s ({pct(other):4.1f}%)"
-    )
-
-
 def build(data, n_neighbors, seed, use_filter, m, p_tau, verbose, tree_init):
+    """Returns (idx, t_build, t_prepare). t_build = NNDescent ctor time
+    (init + iter combined); t_prepare = explicit search-graph prep."""
     t0 = time.perf_counter()
     idx = pynndescent.NNDescent(
         data,
@@ -179,8 +164,13 @@ def build(data, n_neighbors, seed, use_filter, m, p_tau, verbose, tree_init):
         num_projections=m,
         filter_confidence=p_tau,
     )
-    elapsed = time.perf_counter() - t0
-    return idx, elapsed
+    t_build = time.perf_counter() - t0
+    # Force eager search-graph construction so post-processing time isn't
+    # hidden inside the first query call.
+    t1 = time.perf_counter()
+    idx.prepare()
+    t_prepare = time.perf_counter() - t1
+    return idx, t_build, t_prepare
 
 
 def main():
@@ -245,76 +235,88 @@ def main():
     print("\n" + "=" * 60)
     print("VANILLA PyNNDescent")
     print("=" * 60)
-    idx_v, time_v = build(data, args.n_neighbors, args.seed, False,
-                           args.m, args.p_tau, args.verbose, tree_init)
+    idx_v, t_build_v, t_prep_v = build(
+        data, args.n_neighbors, args.seed, False,
+        args.m, args.p_tau, args.verbose, tree_init,
+    )
     recall_v = recall_at_k(idx_v.neighbor_graph[0], gt, args.n_neighbors)
-    print(f"  build time:   {time_v:.2f} s")
+    print(f"  t_build:      {t_build_v:.2f} s   (init + iter)")
+    print(f"  t_prepare:    {t_prep_v:.2f} s   (search-graph build)")
+    print(f"  t_total_idx:  {t_build_v + t_prep_v:.2f} s   (excluding query)")
     print(f"  recall@{args.n_neighbors}:    {recall_v:.4f}")
     print(f"  dist_comps:   {idx_v.n_dist_comps:,}")
     print(f"  filter_skips: {idx_v.n_filter_skips:,} (should be 0)")
-    _print_phase(idx_v, time_v)
     search_recall_v = None
     qps_v = None
+    query_time_v = None
     if queries is not None:
         tq = time.perf_counter()
         pred_q, _ = idx_v.query(queries, k=args.n_neighbors)
         query_time_v = time.perf_counter() - tq
         search_recall_v = recall_at_k(pred_q, search_gt, args.n_neighbors)
         qps_v = queries.shape[0] / query_time_v
-        print(f"  query time:   {query_time_v:.3f} s ({qps_v:.0f} qps)")
+        print(f"  t_query:      {query_time_v:.3f} s ({qps_v:.0f} qps)")
         print(f"  search recall@{args.n_neighbors}: {search_recall_v:.4f}")
 
     print("\n" + "=" * 60)
     print(f"PyNNDescent + ProjFilter (m={args.m}, p_tau={args.p_tau})")
     print("=" * 60)
-    idx_f, time_f = build(data, args.n_neighbors, args.seed, True,
-                           args.m, args.p_tau, args.verbose, tree_init)
+    idx_f, t_build_f, t_prep_f = build(
+        data, args.n_neighbors, args.seed, True,
+        args.m, args.p_tau, args.verbose, tree_init,
+    )
     recall_f = recall_at_k(idx_f.neighbor_graph[0], gt, args.n_neighbors)
-    print(f"  build time:   {time_f:.2f} s")
+    print(f"  t_build:      {t_build_f:.2f} s   (init + iter)")
+    print(f"  t_prepare:    {t_prep_f:.2f} s   (search-graph build)")
+    print(f"  t_total_idx:  {t_build_f + t_prep_f:.2f} s   (excluding query)")
     print(f"  recall@{args.n_neighbors}:    {recall_f:.4f}")
     print(f"  dist_comps:   {idx_f.n_dist_comps:,}")
     print(f"  filter_skips: {idx_f.n_filter_skips:,}")
-    _print_phase(idx_f, time_f)
     search_recall_f = None
     qps_f = None
+    query_time_f = None
     if queries is not None:
         tq = time.perf_counter()
         pred_q, _ = idx_f.query(queries, k=args.n_neighbors)
         query_time_f = time.perf_counter() - tq
         search_recall_f = recall_at_k(pred_q, search_gt, args.n_neighbors)
         qps_f = queries.shape[0] / query_time_f
-        print(f"  query time:   {query_time_f:.3f} s ({qps_f:.0f} qps)")
+        print(f"  t_query:      {query_time_f:.3f} s ({qps_f:.0f} qps)")
         print(f"  search recall@{args.n_neighbors}: {search_recall_f:.4f}")
 
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"  Time ratio (filter/vanilla):    {time_f/time_v:.3f}x")
-    if idx_v.t_local_join > 0:
-        lj_ratio = idx_f.t_local_join / idx_v.t_local_join
-        lj_save_pct = 100.0 * (1.0 - lj_ratio)
-        print(
-            f"  Local-join time (vanilla):      {idx_v.t_local_join:.2f}s "
-            f"({100.0*idx_v.t_local_join/time_v:.1f}% of build)"
-        )
-        print(
-            f"  Local-join time (filter):       {idx_f.t_local_join:.2f}s "
-            f"({100.0*idx_f.t_local_join/time_f:.1f}% of build)"
-        )
-        print(
-            f"  Local-join savings:             {lj_save_pct:+.1f}%  "
-            f"(ceiling for filter wall-clock impact)"
-        )
+    # Phase-by-phase comparison
+    print(f"  t_build   (init+iter)        : vanilla {t_build_v:.2f}s  filter {t_build_f:.2f}s  "
+          f"ratio {t_build_f/t_build_v:.3f}x  Δ {t_build_v - t_build_f:+.2f}s saved")
+    print(f"  t_prepare (search-graph)     : vanilla {t_prep_v:.2f}s  filter {t_prep_f:.2f}s  "
+          f"ratio {t_prep_f/max(t_prep_v,1e-9):.3f}x")
+    t_total_v = t_build_v + t_prep_v
+    t_total_f = t_build_f + t_prep_f
+    print(f"  t_total   (build + prepare)  : vanilla {t_total_v:.2f}s  filter {t_total_f:.2f}s  "
+          f"ratio {t_total_f/t_total_v:.3f}x  Δ {t_total_v - t_total_f:+.2f}s saved")
     print(f"  Construction recall delta:      {recall_f - recall_v:+.4f}")
-    dc_saved = idx_v.n_dist_comps - idx_f.n_dist_comps
-    dc_saved_pct = 100.0 * dc_saved / max(idx_v.n_dist_comps, 1)
-    print(f"  Dist comps saved:               {dc_saved:,} ({dc_saved_pct:+.1f}%)")
+    # Dist-comp savings decomposition: direct (filter skips) + trajectory (graph
+    # evolved differently, so some vanilla pairs never even appeared as candidates)
+    direct_save = idx_f.n_filter_skips
+    total_save = idx_v.n_dist_comps - idx_f.n_dist_comps
+    trajectory_save = total_save - direct_save
+    pct = lambda x: 100.0 * x / max(idx_v.n_dist_comps, 1)
+    print(f"  Dist comps saved (direct):      {direct_save:,} ({pct(direct_save):+.1f}%) "
+          f"= pairs filter rejected")
+    print(f"  Dist comps saved (trajectory):  {trajectory_save:,} ({pct(trajectory_save):+.1f}%) "
+          f"= pairs the modified graph trajectory never generated")
+    print(f"  Dist comps saved (TOTAL):       {total_save:,} ({pct(total_save):+.1f}%)")
     print(f"  Filter fire rate:               {100.0*idx_f.n_filter_skips/max(idx_v.n_dist_comps, 1):.1f}%")
     if search_recall_v is not None:
         print(f"  Search recall delta:            "
               f"{search_recall_f - search_recall_v:+.4f}  "
               f"(vanilla={search_recall_v:.4f} filter={search_recall_f:.4f})")
         print(f"  QPS ratio (filter/vanilla):     {qps_f/qps_v:.3f}x")
+    # Backwards-compat name for downstream gate checks
+    time_v = t_build_v
+    time_f = t_build_f
     gate1 = (recall_v - recall_f) <= 0.01
     gate2 = idx_f.n_dist_comps < idx_v.n_dist_comps
     print(f"  Gate 1 (construction recall <= 1pp loss): {'PASS' if gate1 else 'FAIL'}")

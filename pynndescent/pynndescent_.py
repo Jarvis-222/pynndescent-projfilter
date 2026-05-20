@@ -18,7 +18,6 @@ from scipy.sparse import (
 )
 
 import heapq
-import time
 
 import pynndescent.sparse as sparse
 import pynndescent.sparse_nndescent as sparse_nnd
@@ -234,7 +233,6 @@ def process_candidates(
     use_projection_filter,
     dist_comp_counter,
     filter_skip_counter,
-    phase_time_acc,
 ):
     """Process candidate neighbors using array-based update generation.
 
@@ -257,8 +255,6 @@ def process_candidates(
 
         dist_thresholds = current_graph[1][:, 0]
 
-        with numba.objmode(t0="float64"):
-            t0 = time.perf_counter()
         generate_graph_update_array(
             update_array,
             n_updates_per_thread,
@@ -274,21 +270,12 @@ def process_candidates(
             dist_comp_counter,
             filter_skip_counter,
         )
-        with numba.objmode(t1="float64"):
-            t1 = time.perf_counter()
-        phase_time_acc[0] += t1 - t0
 
         c += apply_graph_update_array(
             current_graph, update_array, n_updates_per_thread, n_threads
         )
-        with numba.objmode(t2="float64"):
-            t2 = time.perf_counter()
-        phase_time_acc[1] += t2 - t1
 
     return c
-
-
-EMPTY_PHASE_TIMES = np.zeros(3, dtype=np.float64)
 
 
 @numba.njit()
@@ -307,7 +294,6 @@ def nn_descent_internal(
     use_projection_filter=False,
     dist_comp_counter=EMPTY_COUNTER,
     filter_skip_counter=EMPTY_COUNTER,
-    phase_time_acc=EMPTY_PHASE_TIMES,
 ):
     n_vertices = data.shape[0]
     block_size = 16384
@@ -331,14 +317,9 @@ def nn_descent_internal(
         if verbose:
             print("\t", n + 1, " / ", n_iters)
 
-        with numba.objmode(t_bc0="float64"):
-            t_bc0 = time.perf_counter()
         (new_candidate_neighbors, old_candidate_neighbors) = new_build_candidates(
             current_graph, max_candidates, rng_state, n_threads
         )
-        with numba.objmode(t_bc1="float64"):
-            t_bc1 = time.perf_counter()
-        phase_time_acc[2] += t_bc1 - t_bc0
 
         c = process_candidates(
             data,
@@ -356,7 +337,6 @@ def nn_descent_internal(
             use_projection_filter,
             dist_comp_counter,
             filter_skip_counter,
-            phase_time_acc,
         )
 
         if c <= delta * n_neighbors * data.shape[0]:
@@ -384,7 +364,6 @@ def nn_descent(
     use_projection_filter=False,
     dist_comp_counter=EMPTY_COUNTER,
     filter_skip_counter=EMPTY_COUNTER,
-    phase_time_acc=EMPTY_PHASE_TIMES,
 ):
 
     if init_graph[0].shape[0] == 1:  # EMPTY_GRAPH
@@ -417,7 +396,6 @@ def nn_descent(
         use_projection_filter=use_projection_filter,
         dist_comp_counter=dist_comp_counter,
         filter_skip_counter=filter_skip_counter,
-        phase_time_acc=phase_time_acc,
     )
 
     return deheap_sort(current_graph[0], current_graph[1])
@@ -1152,10 +1130,6 @@ class NNDescent:
         self._dist_comp_counter = np.zeros(n_threads_active, dtype=np.int64)
         self._filter_skip_counter = np.zeros(n_threads_active, dtype=np.int64)
 
-        # Phase-time accumulator: [local_join, apply_update, build_candidates]
-        # in seconds, summed across all iterations of the descent loop.
-        self._phase_time_acc = np.zeros(3, dtype=np.float64)
-
         current_random_state = check_random_state(self.random_state)
 
         self._distance_correction = None
@@ -1346,14 +1320,10 @@ class NNDescent:
                 use_projection_filter=self.use_projection_filter,
                 dist_comp_counter=self._dist_comp_counter,
                 filter_skip_counter=self._filter_skip_counter,
-                phase_time_acc=self._phase_time_acc,
             )
         # Expose totals for benchmarks/instrumentation.
         self.n_dist_comps = int(self._dist_comp_counter.sum())
         self.n_filter_skips = int(self._filter_skip_counter.sum())
-        self.t_local_join = float(self._phase_time_acc[0])
-        self.t_apply_update = float(self._phase_time_acc[1])
-        self.t_build_candidates = float(self._phase_time_acc[2])
 
         if np.any(self._neighbor_graph[0] < 0):
             warn(
