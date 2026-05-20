@@ -36,6 +36,34 @@ from bench_knng import (
 )
 
 
+class _Tee:
+    """Stdout wrapper: writes to multiple streams (terminal + log file)."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def _make_results_path(args, tree_init):
+    """Pick a descriptive filename under <repo>/results/ for this run."""
+    init_tag = "tree" if tree_init else "rand"
+    ts = time.strftime("%Y%m%dT%H%M")
+    fname = (
+        f"sweep_recall_grid_{args.dataset}"
+        f"_mc{args.mc}_m{args.m}_{init_tag}_{ts}.txt"
+    )
+    results_dir = Path(__file__).resolve().parent.parent / "results"
+    results_dir.mkdir(exist_ok=True)
+    return results_dir / fname
+
+
 def build_and_prepare(data, n_neighbors, mc, seed, use_filter, m, p_tau,
                        tree_init):
     """Build + eagerly prepare. Returns (idx, t_build, t_prepare)."""
@@ -82,6 +110,15 @@ def main():
     eval_ks = sorted(set(int(k) for k in args.eval_ks.split(",")))
     max_eval_k = max(eval_ks)
     tree_init = not args.no_tree_init
+
+    # Tee stdout to a result file so the run is captured to disk while still
+    # showing live progress in the terminal. File path is committable so the
+    # results can be pushed back from uni and pulled on the laptop.
+    log_path = _make_results_path(args, tree_init)
+    _log_file = open(log_path, "w")
+    _orig_stdout = sys.stdout
+    sys.stdout = _Tee(_orig_stdout, _log_file)
+    print(f"# results being written to: {log_path}")
 
     cfg = DATASETS[args.dataset]
     print(f"Grid sweep on {args.dataset}")
@@ -235,6 +272,11 @@ def main():
                       f"{r['filter_skips']},{er['eps']:.2f},"
                       f"{er['qps']:.2f},{er['qtime']:.4f},"
                       f"{k},{er['recalls'][k]:.4f}")
+
+    # Restore stdout and close the log file
+    sys.stdout = _orig_stdout
+    _log_file.close()
+    print(f"\nResults saved to: {log_path}")
 
 
 if __name__ == "__main__":
