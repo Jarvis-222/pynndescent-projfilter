@@ -171,6 +171,11 @@ EMPTY_PROJECTIONS = np.zeros((1, 1), dtype=np.float32)
 # from any reasonable thread count land in-bounds; reads are discarded.
 EMPTY_COUNTER = np.zeros(256, dtype=np.int64)
 
+# Sentinel for the phase-B (iteration-loop) timer. Single-element float64
+# array, accumulator-style. Callers that care about iteration time pass
+# their own array and read it after nn_descent returns; the rest use this.
+EMPTY_PHASE_TIMER = np.zeros(1, dtype=np.float64)
+
 # Threshold above which dist_thresh is treated as "not yet meaningful"
 # (i.e., heap not yet full of real neighbors). Initial heap distances are
 # np.inf; under fastmath=True the LLVM 'ninf' flag makes inf-arithmetic

@@ -203,6 +203,8 @@ def main():
         rows.append({
             "name": name, "use_filter": use_filter, "p_tau": p_tau,
             "t_build": t_build, "t_prepare": t_prep,
+            "t_phase_b": idx.t_phase_b,
+            "t_phase_a": max(t_build - idx.t_phase_b, 0.0),
             "dist_comps": idx.n_dist_comps,
             "filter_skips": idx.n_filter_skips,
             "per_eps": per_eps,
@@ -213,15 +215,16 @@ def main():
     print(f"TIME BREAKDOWN  (dataset={args.dataset}, mc={args.mc}, m={args.m}, "
           f"tree_init={tree_init})")
     print("=" * 100)
-    print(f"{'config':<12}  {'t_build':>10}  {'t_prepare':>10}  "
-          f"{'t_total':>10}  {'dist_comps':>14}  {'skip%':>6}")
-    print("-" * 70)
+    print(f"{'config':<12}  {'t_build':>10}  {'phaseA':>9}  {'phaseB':>9}  "
+          f"{'t_prepare':>10}  {'t_total':>10}  {'dist_comps':>14}  {'skip%':>6}")
+    print("-" * 100)
     vanilla_dc = rows[0]["dist_comps"]
     for r in rows:
         total = r["t_build"] + r["t_prepare"]
         total_attempted = max(r["dist_comps"] + r["filter_skips"], 1)
         skip_pct = 100.0 * r["filter_skips"] / total_attempted
-        print(f"{r['name']:<12}  {r['t_build']:>9.2f}s  {r['t_prepare']:>9.2f}s"
+        print(f"{r['name']:<12}  {r['t_build']:>9.2f}s  {r['t_phase_a']:>8.2f}s  "
+              f"{r['t_phase_b']:>8.2f}s  {r['t_prepare']:>9.2f}s"
               f"  {total:>9.2f}s  {r['dist_comps']:>14,}  {skip_pct:>5.1f}%")
 
     # Dist-comp savings decomposition
@@ -266,12 +269,13 @@ def main():
 
     # CSV long-format dump
     print(f"\n--- CSV (long format, one row per config x epsilon x k) ---")
-    print("config,p_tau,t_build,t_prepare,dist_comps,filter_skips,"
-          "epsilon,qps,qtime,k,search_recall")
+    print("config,p_tau,t_build,t_phase_a,t_phase_b,t_prepare,"
+          "dist_comps,filter_skips,epsilon,qps,qtime,k,search_recall")
     for r in rows:
         for er in r["per_eps"]:
             for k in eval_ks:
                 print(f"{r['name']},{r['p_tau']:.2f},{r['t_build']:.3f},"
+                      f"{r['t_phase_a']:.3f},{r['t_phase_b']:.3f},"
                       f"{r['t_prepare']:.3f},{r['dist_comps']},"
                       f"{r['filter_skips']},{er['eps']:.2f},"
                       f"{er['qps']:.2f},{er['qtime']:.4f},"

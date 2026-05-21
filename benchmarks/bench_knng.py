@@ -240,7 +240,10 @@ def main():
         args.m, args.p_tau, args.verbose, tree_init,
     )
     recall_v = recall_at_k(idx_v.neighbor_graph[0], gt, args.n_neighbors)
+    t_phase_a_v = max(t_build_v - idx_v.t_phase_b, 0.0)
     print(f"  t_build:      {t_build_v:.2f} s   (init + iter)")
+    print(f"    phase A (init)  : {t_phase_a_v:.2f} s   (derived = t_build - t_phase_b)")
+    print(f"    phase B (iter)  : {idx_v.t_phase_b:.2f} s   (measured inside Numba)")
     print(f"  t_prepare:    {t_prep_v:.2f} s   (search-graph build)")
     print(f"  t_total_idx:  {t_build_v + t_prep_v:.2f} s   (excluding query)")
     print(f"  recall@{args.n_neighbors}:    {recall_v:.4f}")
@@ -266,7 +269,10 @@ def main():
         args.m, args.p_tau, args.verbose, tree_init,
     )
     recall_f = recall_at_k(idx_f.neighbor_graph[0], gt, args.n_neighbors)
+    t_phase_a_f = max(t_build_f - idx_f.t_phase_b, 0.0)
     print(f"  t_build:      {t_build_f:.2f} s   (init + iter)")
+    print(f"    phase A (init)  : {t_phase_a_f:.2f} s   (derived = t_build - t_phase_b)")
+    print(f"    phase B (iter)  : {idx_f.t_phase_b:.2f} s   (measured inside Numba)")
     print(f"  t_prepare:    {t_prep_f:.2f} s   (search-graph build)")
     print(f"  t_total_idx:  {t_build_f + t_prep_f:.2f} s   (excluding query)")
     print(f"  recall@{args.n_neighbors}:    {recall_f:.4f}")
@@ -290,6 +296,11 @@ def main():
     # Phase-by-phase comparison
     print(f"  t_build   (init+iter)        : vanilla {t_build_v:.2f}s  filter {t_build_f:.2f}s  "
           f"ratio {t_build_f/t_build_v:.3f}x  Δ {t_build_v - t_build_f:+.2f}s saved")
+    print(f"    phase A (init)             : vanilla {t_phase_a_v:.2f}s  filter {t_phase_a_f:.2f}s  "
+          f"Δ {t_phase_a_v - t_phase_a_f:+.2f}s (should be small)")
+    print(f"    phase B (iter, FILTER HITS): vanilla {idx_v.t_phase_b:.2f}s  filter {idx_f.t_phase_b:.2f}s  "
+          f"ratio {idx_f.t_phase_b/max(idx_v.t_phase_b,1e-9):.3f}x  "
+          f"Δ {idx_v.t_phase_b - idx_f.t_phase_b:+.2f}s saved")
     print(f"  t_prepare (search-graph)     : vanilla {t_prep_v:.2f}s  filter {t_prep_f:.2f}s  "
           f"ratio {t_prep_f/max(t_prep_v,1e-9):.3f}x")
     t_total_v = t_build_v + t_prep_v

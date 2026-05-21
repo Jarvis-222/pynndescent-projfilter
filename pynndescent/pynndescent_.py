@@ -18,6 +18,7 @@ from scipy.sparse import (
 )
 
 import heapq
+import time
 
 import pynndescent.sparse as sparse
 import pynndescent.sparse_nndescent as sparse_nnd
@@ -43,6 +44,7 @@ from pynndescent.utils import (
     EMPTY_GRAPH,
     EMPTY_PROJECTIONS,
     EMPTY_COUNTER,
+    EMPTY_PHASE_TIMER,
 )
 
 from pynndescent.rp_trees import (
@@ -294,6 +296,7 @@ def nn_descent_internal(
     use_projection_filter=False,
     dist_comp_counter=EMPTY_COUNTER,
     filter_skip_counter=EMPTY_COUNTER,
+    phase_b_time_acc=EMPTY_PHASE_TIMER,
 ):
     n_vertices = data.shape[0]
     block_size = 16384
@@ -312,6 +315,10 @@ def nn_descent_internal(
     )
     update_array = np.empty((n_threads, max_updates_per_thread, 3), dtype=np.float32)
     n_updates_per_thread = np.zeros(n_threads, dtype=np.int32)
+
+    # === Phase B (iteration loop) timing starts here ===
+    with numba.objmode(_t_phase_b_start="float64"):
+        _t_phase_b_start = time.perf_counter()
 
     for n in range(n_iters):
         if verbose:
@@ -342,7 +349,13 @@ def nn_descent_internal(
         if c <= delta * n_neighbors * data.shape[0]:
             if verbose:
                 print("\tStopping threshold met -- exiting after", n + 1, "iterations")
-            return
+            break
+
+    # === Phase B (iteration loop) timing ends here ===
+    # Use 'break' above (not 'return') so this accumulator update always runs.
+    with numba.objmode(_t_phase_b_end="float64"):
+        _t_phase_b_end = time.perf_counter()
+    phase_b_time_acc[0] += _t_phase_b_end - _t_phase_b_start
 
 
 @numba.njit()
@@ -364,6 +377,7 @@ def nn_descent(
     use_projection_filter=False,
     dist_comp_counter=EMPTY_COUNTER,
     filter_skip_counter=EMPTY_COUNTER,
+    phase_b_time_acc=EMPTY_PHASE_TIMER,
 ):
 
     if init_graph[0].shape[0] == 1:  # EMPTY_GRAPH
@@ -396,6 +410,7 @@ def nn_descent(
         use_projection_filter=use_projection_filter,
         dist_comp_counter=dist_comp_counter,
         filter_skip_counter=filter_skip_counter,
+        phase_b_time_acc=phase_b_time_acc,
     )
 
     return deheap_sort(current_graph[0], current_graph[1])
@@ -1129,6 +1144,9 @@ class NNDescent:
         n_threads_active = numba.get_num_threads()
         self._dist_comp_counter = np.zeros(n_threads_active, dtype=np.int64)
         self._filter_skip_counter = np.zeros(n_threads_active, dtype=np.int64)
+        # Phase-B (NN-Descent iteration loop) wall-clock accumulator.
+        # Captured inside Numba via objmode; read back here after nn_descent.
+        self._phase_b_timer = np.zeros(1, dtype=np.float64)
 
         current_random_state = check_random_state(self.random_state)
 
@@ -1320,10 +1338,13 @@ class NNDescent:
                 use_projection_filter=self.use_projection_filter,
                 dist_comp_counter=self._dist_comp_counter,
                 filter_skip_counter=self._filter_skip_counter,
+                phase_b_time_acc=self._phase_b_timer,
             )
         # Expose totals for benchmarks/instrumentation.
         self.n_dist_comps = int(self._dist_comp_counter.sum())
         self.n_filter_skips = int(self._filter_skip_counter.sum())
+        # Phase-B (iteration-loop) wall-clock time, accumulated inside Numba.
+        self.t_phase_b = float(self._phase_b_timer[0])
 
         if np.any(self._neighbor_graph[0] < 0):
             warn(
