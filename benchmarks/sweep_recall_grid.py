@@ -30,10 +30,26 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench_knng import (
     DATASETS,
+    DATA_DIR,
     load_fvecs,
     get_or_compute_search_gt,
     recall_at_k,
 )
+
+# --- Sweep-only dataset extensions ---
+# These datasets don't have pre-computed construction ground truth.
+# sweep_recall_grid never reads `gt` (it only measures search recall),
+# so leaving it None is safe. search_gt is computed on the fly via
+# get_or_compute_search_gt (FAISS-style brute force + caching) on first
+# run, then reloaded from the .ivecs cache for subsequent runs.
+DATASETS = dict(DATASETS)  # copy so we don't mutate bench_knng's dict
+DATASETS["gist500k"] = {
+    "base":      DATA_DIR / "gist" / "gist_base.fvecs",
+    "gt":        None,
+    "n_subset":  500_000,
+    "queries":   DATA_DIR / "gist" / "gist_query.fvecs",
+    "search_gt": DATA_DIR / "gist500k_search_gt_for_std_query.ivecs",
+}
 
 
 class _Tee:
